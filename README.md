@@ -303,7 +303,8 @@ results_df['Predicted Sentiment'] = results_df['Predicted Sentiment'].map({1: 'P
 print("\n--- Tabulated Results ---")
 print(results_df)
 
-print("\n--- SCRIPT COMPLETE ---")```
+print("\n--- SCRIPT COMPLETE ---")
+```
 
 graphs :
 
