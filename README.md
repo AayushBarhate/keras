@@ -1,5 +1,6 @@
 # keras
 
+sentiment:
 ```py
 import pandas as pd
 import numpy as np
@@ -303,3 +304,69 @@ print("\n--- Tabulated Results ---")
 print(results_df)
 
 print("\n--- SCRIPT COMPLETE ---")```
+
+graphs :
+
+```py
+import matplotlib.pyplot as plt
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    RocCurveDisplay,
+    auc,
+    roc_curve
+)
+import numpy as np
+
+# --- 1. Get Your Data ---
+# You would replace these with your actual model's outputs
+# y_true = Your true test labels (e.g., from X_test)
+# y_pred = Your model's binary predictions (e.g., from model.predict(X_test))
+# y_prob = Your model's probability predictions for the *positive class*
+#          (e.g., from model.predict_proba(X_test)[:, 1])
+
+# Let's create some example data to make this script runnable
+y_true = np.array([0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1])
+y_pred = np.array([0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0])
+y_prob = np.array([0.1, 0.9, 0.2, 0.4, 0.3, 0.8, 0.3, 0.6, 0.1, 0.7, 0.9, 0.2, 0.8, 0.1, 0.4])
+
+# Define the names of your classes
+target_names = ['Class 0 (Negative)', 'Class 1 (Positive)']
+
+# --- 2. Numeric Report: Is the model good? ---
+# This prints Precision, Recall, F1-Score, and Accuracy
+print("--- Classification Report ---")
+print(classification_report(y_true, y_pred, target_names=target_names))
+
+# --- 3. Confusion Matrix (Numeric and Graphed) ---
+print("\n--- Confusion Matrix ---")
+# Get the numeric matrix
+cm = confusion_matrix(y_true, y_pred)
+print(cm)
+
+# Plot the confusion matrix
+print("Displaying Confusion Matrix plot...")
+
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=target_names)
+disp.plot(cmap=plt.cm.Blues)
+plt.title("Confusion Matrix")
+plt.show()
+
+# --- 4. Graph 2: ROC Curve & AUC ---
+# This is one of the best ways to evaluate a binary classifier
+print("\nDisplaying ROC Curve plot...")
+
+# Calculate the values for the ROC curve
+fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+roc_auc = auc(fpr, tpr)
+
+print(f"Area Under Curve (AUC): {roc_auc:.4f}")
+
+# Plot the ROC curve
+
+display = RocCurveDisplay(fpr=fpr, tpr=tpr, roc_auc=roc_auc, estimator_name='Your Model')
+display.plot()
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--') # Add diagonal "random guess" line
+plt.title('Receiver Operating Characteristic (ROC) Curve')
+plt.show()```
