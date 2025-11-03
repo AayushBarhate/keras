@@ -370,4 +370,236 @@ display = RocCurveDisplay(fpr=fpr, tpr=tpr, roc_auc=roc_auc, estimator_name='You
 display.plot()
 plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--') # Add diagonal "random guess" line
 plt.title('Receiver Operating Characteristic (ROC) Curve')
-plt.show()```
+plt.show()
+```
+eng to hind
+```py
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.layers import Input, LSTM, Dense, Embedding, TextVectorization
+from tensorflow.keras.models import Model
+import numpy as np
+import string
+import re
+import os
+
+# --- 1. Configuration & Data Download ---
+batch_size = 64
+latent_dim = 256
+num_samples = 10000
+epochs = 20  # Start with fewer epochs to test
+
+# Download the data (English-Hindi)
+data_path = keras.utils.get_file(
+    "hin-eng.zip",
+    origin="http://www.manythings.org/anki/hin-eng.zip",
+    extract=True,
+)
+data_path = os.path.dirname(data_path) + "/hin-eng/hin.txt"
+
+# --- 2. Load and Clean Data ---
+input_texts = []
+target_texts = []
+
+with open(data_path, "r", encoding="utf-8") as f:
+    lines = f.read().split("\n")
+
+for line in lines[: min(num_samples, len(lines) - 1)]:
+    if "\t" not in line:
+        continue
+    input_text, target_text, _ = line.split("\t")
+    
+    # We add [START] and [END] tokens for the "teacher forcing"
+    target_text = "[START] " + target_text.strip() + " [END]"
+    input_text = input_text.strip()
+    
+    input_texts.append(input_text)
+    target_texts.append(target_text)
+
+print(f"Loaded {len(input_texts)} sentence pairs")
+print(f"Example input: {input_texts[100]}")
+print(f"Example target: {target_texts[100]}")
+
+# --- 3. TextVectorization (The New Preprocessing) ---
+
+# Remove punctuation
+def custom_standardization(input_string):
+    lowercase = tf.strings.lower(input_string)
+    stripped_html = tf.strings.regex_replace(lowercase, "<br />", " ")
+    # Keep Hindi characters and our special tokens
+    return tf.strings.regex_replace(
+        stripped_html, f"[^ a-z\u0900-\u097F\[\]]", ""
+    )
+
+# Source (English) vectorizer
+source_vectorization = TextVectorization(
+    max_tokens=15000,
+    output_mode="int",
+    output_sequence_length=None, # We'll pad later in the tf.data pipeline
+    standardize=custom_standardization,
+)
+source_vectorization.adapt(input_texts)
+source_vocab_size = source_vectorization.get_vocabulary_size()
+
+# Target (Hindi) vectorizer
+# We add [START] and [END] to the default vocabulary
+target_vectorization = TextVectorization(
+    max_tokens=15000,
+    output_mode="int",
+    output_sequence_length=None,
+    standardize=custom_standardization,
+    vocabulary=["", "[UNK]", "[START]", "[END]"],
+)
+target_vectorization.adapt(target_texts)
+target_vocab_size = target_vectorization.get_vocabulary_size()
+
+print(f"Source (Eng) vocab size: {source_vocab_size}")
+print(f"Target (Hin) vocab size: {target_vocab_size}")
+
+# Get token-to-index and index-to-token mappings for inference
+target_vocab = target_vectorization.get_vocabulary()
+target_index_to_word = dict(enumerate(target_vocab))
+target_word_to_index = {word: index for index, word in enumerate(target_vocab)}
+
+# --- 4. Create the tf.data.Dataset ---
+# This is much more efficient than the old numpy method
+
+def format_dataset(eng, hin):
+    eng_vec = source_vectorization(eng)
+    hin_vec = target_vectorization(hin)
+    # This creates the "teacher forcing" inputs/outputs
+    # decoder_input = "[START] नमस्ते"
+    # decoder_target = "नमस्ते [END]"
+    return (
+        {"encoder_inputs": eng_vec, "decoder_inputs": hin_vec[:, :-1]}, # Remove [END]
+        hin_vec[:, 1:] # Remove [START] and align
+    )
+
+dataset = tf.data.Dataset.from_tensor_slices((input_texts, target_texts))
+dataset = dataset.batch(batch_size)
+dataset = dataset.map(format_dataset)
+# Use padded_batch to handle variable sequence lengths
+dataset = dataset.padded_batch(batch_size)
+dataset = dataset.shuffle(buffer_size=1024).prefetch(buffer_size=tf.data.AUTOTUNE).cache()
+
+# --- 5. Build the Model (with Embedding layers) ---
+embedding_dim = 256
+
+# Encoder
+encoder_inputs = Input(shape=(None,), name="encoder_inputs", dtype="int64")
+# The new Embedding layer
+encoder_embedding = Embedding(source_vocab_size, embedding_dim, mask_zero=True)(encoder_inputs)
+encoder = LSTM(latent_dim, return_state=True)
+encoder_outputs, state_h, state_c = encoder(encoder_embedding)
+encoder_states = [state_h, state_c]
+
+# Decoder
+decoder_inputs = Input(shape=(None,), name="decoder_inputs", dtype="int64")
+# The new Embedding layer (we'll reuse its weights in the inference model)
+decoder_embedding_layer = Embedding(target_vocab_size, embedding_dim, mask_zero=True)
+decoder_embedding = decoder_embedding_layer(decoder_inputs)
+
+decoder_lstm = LSTM(latent_dim, return_sequences=True, return_state=True)
+decoder_outputs, _, _ = decoder_lstm(decoder_embedding, initial_state=encoder_states)
+
+decoder_dense = Dense(target_vocab_size, activation="softmax")
+decoder_outputs = decoder_dense(decoder_outputs)
+
+# Full training model
+model = Model(
+    [encoder_inputs, decoder_inputs],
+    decoder_outputs
+)
+model.compile(
+    optimizer="rmsprop", 
+    loss="sparse_categorical_crossentropy", # Use this loss for integer targets
+    metrics=["accuracy"]
+)
+model.summary()
+
+# --- 6. Train the Model ---
+print("\nStarting model training...")
+model.fit(dataset, epochs=epochs)
+print("Training complete.")
+
+
+# --- 7. Inference (Decoding) Model ---
+# We build separate models for inference
+
+# Encoder model: Takes text, outputs LSTM states
+encoder_model = Model(encoder_inputs, encoder_states)
+
+# Decoder model: Takes token + states, outputs next token + new states
+decoder_state_input_h = Input(shape=(latent_dim,))
+decoder_state_input_c = Input(shape=(latent_dim,))
+decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
+
+# Get the embedding vector for the single input token
+decoder_embedding_inference = decoder_embedding_layer(decoder_inputs)
+
+decoder_outputs_inference, state_h_inference, state_c_inference = decoder_lstm(
+    decoder_embedding_inference, initial_state=decoder_states_inputs
+)
+decoder_states_inference = [state_h_inference, state_c_inference]
+decoder_outputs_inference = decoder_dense(decoder_outputs_inference)
+
+decoder_model = Model(
+    [decoder_inputs] + decoder_states_inputs,
+    [decoder_outputs_inference] + decoder_states_inference
+)
+print("\nInference models built.")
+
+# --- 8. Translation Function ---
+def decode_sequence(input_sentence):
+    # 1. Vectorize the input sentence
+    input_seq = source_vectorization([input_sentence])
+    
+    # 2. Get the encoder states
+    states_value = encoder_model.predict(input_seq, verbose=0)
+    
+    # 3. Start the decoding loop with the [START] token
+    target_seq = np.zeros((1, 1))
+    target_seq[0, 0] = target_word_to_index["[START]"]
+    
+    stop_condition = False
+    decoded_sentence = ""
+    
+    max_decoder_seq_length = 50 # Set a limit
+
+    while not stop_condition:
+        output_tokens, h, c = decoder_model.predict(
+            [target_seq] + states_value, verbose=0
+        )
+        
+        # Get the most likely token
+        sampled_token_index = np.argmax(output_tokens[0, -1, :])
+        sampled_word = target_index_to_word[sampled_token_index]
+        
+        # Stop if we hit [END] or max length
+        if (sampled_word == "[END]" or
+            len(decoded_sentence.split()) > max_decoder_seq_length):
+            stop_condition = True
+        else:
+            if sampled_word != "[UNK]":
+                decoded_sentence += sampled_word + " "
+            
+        # Update the target sequence (of length 1)
+        target_seq = np.zeros((1, 1))
+        target_seq[0, 0] = sampled_token_index
+        
+        # Update states
+        states_value = [h, c]
+        
+    return decoded_sentence.strip()
+
+# --- 9. Test ---
+print("\n--- Testing Translations ---")
+for i in range(20, 40): # Test on a few examples
+    input_text = input_texts[i]
+    target_text = target_texts[i].replace("[START]", "").replace("[END]", "").strip()
+    decoded_text = decode_sequence(input_text)
+    print("---")
+    print(f"Input (Eng):   {input_text}")
+    print(f"Target (Hin):  {target_text}")
+    print(f"Predicted (Hin): {decoded_text}")
+```
